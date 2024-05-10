@@ -1,0 +1,288 @@
+---
+title: "Case 7 - End-to-End Analytics at Rue La La (Part II)"
+subtitle: "Assignment 7"
+author: "Rawaha Nakhuda"
+date: "March 12th, 2023"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+\newpage
+
+```{r, include = FALSE}
+library(janitor)
+library(compute.es) 
+library(tidyverse)
+library(car)
+library(multcomp) 
+library(pastecs)
+library(tidyverse)
+library(readxl)
+library(broom)
+library(skimr)
+library(lubridate)
+library(RColorBrewer)
+library(gridExtra)
+library(formattable)
+library(knitr)
+library(scales)
+library(caret)
+library(readxl)
+library(factoextra)
+knitr::opts_chunk$set(fig.height=3, fig.width=8, fig.align = "center", 
+                      echo = FALSE, message = FALSE, warning  = FALSE)
+select <- dplyr::select
+mse <- Metrics::mse
+opts <- options(knitr.kable.NA = "")
+```
+
+```{r, include = FALSE}
+df <-  read_excel("Flashion_Data(Part2)-v2.xlsx", sheet = "Historical_Data") %>%
+  clean_names() 
+head(df)
+
+df2 <- read_excel("Flashion_Data(Part2)-v2.xlsx", sheet = "FirstExposures_Data") %>%
+  clean_names()
+
+```
+
+## Price Optimization
+
+### 1. Linear Regression vs Regression Tree
+
+```{r}
+library(rpart)
+library(rpart.plot)
+```
+
+i. Train Test Split
+
+```{r, echo = TRUE}
+prediction_data <- df[, 2:17]
+set.seed(19) 
+index <- createDataPartition(prediction_data$price, p = 0.8, list = FALSE)
+train_data <- prediction_data[index, ]
+test_data <- prediction_data[-index, ]
+```
+
+ii. Regression Trees
+
+```{r, fig.cap= "Regression Tree of Training Data"}
+regression_tree= rpart(formula = demand~., data = train_data, method = "anova")
+rpart.plot(regression_tree)
+```
+```{r}
+pred_tree <- predict(regression_tree, newdata = test_data)
+test_data <- cbind(test_data, pred_tree)
+```
+
+iii. Linear Regression
+
+```{r}
+lm_model <- lm(demand ~ ., data = train_data)
+pred_lm <- predict(lm_model, newdata = test_data)
+test_data <- cbind(test_data, pred_lm)
+
+kable(head(tidy(lm_model))[1:2], digits = 0, caption = "Regression Model Coefficients")
+```
+
+iv. MSE Comparison
+
+```{r}
+library(Metrics)
+mse_tree <- mean((test_data$pred_tree - test_data$demand)^2)
+mse_lm <- mean((test_data$pred_lm - test_data$demand)^2)
+
+metrics <- tibble("MSE Linear Regression" = mse_lm,
+                  "MSE Regression Tree" = mse_tree)
+
+kable(metrics, digits = 0, caption = "MSE for Predicted Values", 
+      format.args = list(big.mark = ","))
+```
+
+Conclusion:
+
+The MSE for Regression Tree predictions is lower, and therefore performs significantly better.
+
+\newpage
+
+### 2. Optimal Price
+
+$$
+\begin{aligned}
+\operatorname{Max} & \sum_{i \in N} \sum_{j \in M} p_j \widehat{D}_{i j k} x_{i j} \\
+\text { s.t } \\
+& \sum_{j \in M} x_{i j}=1 \quad \forall i \in N \\
+& \sum_{i \in N} \sum_{j \in M} p_j x_{i j}=k \\
+& x_{i j} \in\{0,1\}\\
+\end{aligned}
+$$
+
+i. Defining the list of prices
+
+```{r}
+Prices = c(25, 30, 35)
+P = rep(Prices, nrow(df2))
+```
+ii. Preparing variables
+```{r}
+first_data = df2[rep(seq_len(nrow(df2)), each = 3), ]
+```
+iii. Possible k values 
+```{r}
+possible_k = seq(length(Prices)*min(Prices), length(Prices)*max(Prices),by=5)
+```
+iv. Initializing model
+
+```{r}
+library(lpSolve)
+pred_dem= vector(mode= "numeric")
+Objectives= vector(mode= "numeric")
+Solutions= matrix(nrow= length(possible_k), ncol= length(Prices)*nrow(df2))
+```
+v. Solving the model for Regression Trees
+
+```{r}
+for (n in 1:length(possible_k)){
+      for (i in 1:length(P)){
+          first_data$price = P[i]
+          first_data$relative_price_of_competing_styles = P[i]/(possible_k[n]/3)
+          pred_dem[i] = predict(regression_tree, first_data[i, ])
+          
+      }
+  
+      Obj_coeff = pred_dem*P
+      
+      Cons_coeff = matrix(c(1,1,1,0,0,0,0,0,0,
+                            0,0,0,1,1,1,0,0,0,
+                            0,0,0,0,0,0,1,1,1,
+                            P[1], P[2],P[3],P[4],P[5],P[6],P[7],P[8],P[9]),
+                            nrow = 4, byrow = TRUE)
+  
+      Dir = c("==",
+              "==",
+              "==",
+              "==")
+      
+      RHS = c(1,1,1,possible_k[n])
+      Model = lp("max", Obj_coeff, Cons_coeff, Dir, RHS, all.bin = TRUE)
+      Objectives[n] = Model$objval
+      Solutions[n,] = Model$solution
+}
+kable(cbind(Solutions, Objectives), caption = "Optimal Price Solutions for Regression Tree",
+      format.args = list(big.mark = ","), digits = 0)
+```
+
+vi. Initializing model for Linear Regression
+
+```{r}
+library(lpSolve)
+pred_dem= vector(mode= "numeric")
+Objectives= vector(mode= "numeric")
+Solutions= matrix(nrow= length(possible_k), ncol= length(Prices)*nrow(df2))
+```
+vii. Solving the model for Linear Regression
+
+```{r}
+for (n in 1:length(possible_k)){
+      for (i in 1:length(P)){
+          first_data$price = P[i]
+          first_data$relative_price_of_competing_styles = P[i]/(possible_k[n]/3)
+          pred_dem[i] = predict(lm_model, first_data[i, ])
+          
+      }
+  
+      Obj_coeff = pred_dem*P
+      
+      Cons_coeff = matrix(c(1,1,1,0,0,0,0,0,0,
+                            0,0,0,1,1,1,0,0,0,
+                            0,0,0,0,0,0,1,1,1,
+                            P[1], P[2],P[3],P[4],P[5],P[6],P[7],P[8],P[9]),
+                            nrow = 4, byrow = TRUE)
+  
+      Dir = c("==",
+              "==",
+              "==",
+              "==")
+      
+      RHS = c(1,1,1,possible_k[n])
+      Model = lp("max", Obj_coeff, Cons_coeff, Dir, RHS, all.bin = TRUE)
+      Objectives[n] = Model$objval
+      Solutions[n,] = Model$solution
+}
+kable(cbind(Solutions, Objectives), caption = "Optimal Price Solutions for Linear Regression Model",
+      format.args = list(big.mark = ","), digits = 0)
+```
+
+Conclusion: 
+
+The optimal price is not changing between the two models. However since the predicted demand is different, the revenue is maximized for the linear regression model.
+
+\newpage
+
+### 3. Optimal Prices with Assumptions
+
+Constraints:  
+1. Items B & C cannot be sold for $35  
+2. Item A cannot be sold for $25
+
+i. Defining the list of prices
+
+```{r}
+P2 = c(30,35,rep(c(25,30),2))
+```
+ii. Preparing variables
+```{r}
+first_data2 = df2[rep(seq_len(nrow(df2)), each = 2), ]
+```
+iii. Possible k values 
+```{r}
+possible_k1 = c(80,85,90,95)
+```
+iv. Initializing model
+
+```{r}
+library(lpSolve)
+pred_dem2= vector(mode= "numeric")
+Objectives2= vector(mode= "numeric")
+Solutions2= matrix(nrow = length(possible_k1), ncol = nrow(first_data2))
+```
+v. Solving the model for Regression Trees with the assumptions
+
+```{r}
+for (n in 1:length(possible_k1)){
+      for (i in 1:length(P2)){
+          first_data2$price = P2[i]
+          first_data2$relative_price_of_competing_styles = P2[i]/(possible_k1[n]/3)
+          pred_dem2[i] = predict(regression_tree, first_data2[i, ])
+          
+      }
+  
+      Obj_coeff = pred_dem2*P2
+      
+      Cons_coeff = matrix(c(1,1,0,0,0,0,
+                            0,0,1,1,0,0,
+                            0,0,0,0,1,1,
+                            P[1], P[2],P[3],P[4],P[5],P[6]),
+                            nrow = 4, byrow = TRUE)
+  
+      Dir = c("==",
+              "==",
+              "==",
+              "==")
+      
+      RHS = c(1,1,1,possible_k1[n])
+      Model = lp("max", Obj_coeff, Cons_coeff, Dir, RHS, all.bin = TRUE)
+      Objectives2[n] = Model$objval
+      Solutions2[n,] = Model$solution
+}
+kable((cbind(Solutions2, Objectives2)), caption = "Optimal Price Solutions for Regression Tree with Constraints", format.args = list(big.mark = ","), digits = 0)
+
+```
+Conclusion:
+
+The objective value is equal to 511,882.
+

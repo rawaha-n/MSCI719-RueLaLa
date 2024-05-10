@@ -1,0 +1,249 @@
+---
+title: "Case 7 - End-to-End Analytics at Rue La La (Part I)"
+author: "Rawaha Nakhuda"
+date: "March 5th, 2023"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+\newpage
+
+# Assignment 6
+
+```{r, include = FALSE}
+library(janitor)
+library(compute.es) 
+library(tidyverse)
+library(car)
+library(multcomp) 
+library(pastecs)
+library(tidyverse)
+library(readxl)
+library(broom)
+library(skimr)
+library(lubridate)
+library(RColorBrewer)
+library(gridExtra)
+library(formattable)
+library(knitr)
+library(scales)
+library(caret)
+library(readxl)
+library(factoextra)
+knitr::opts_chunk$set(fig.height=3, fig.width=8, fig.align = "center", 
+                      echo = FALSE, message = FALSE, warning  = FALSE)
+select <- dplyr::select
+opts <- options(knitr.kable.NA = "")
+```
+
+```{r, include = FALSE}
+df <-  read_excel("Flashion_Data(Part1).xlsx", sheet = "Data") %>%
+  clean_names() 
+head(df)
+
+```
+
+## Demand Estimation
+
+### 1. Difference between Total Sales and Demand
+
+In the context of the case:
+
+-   Total sales refers to the total items sold of a specific item in an event
+-   Demand is the prediction of how much the item is expected to sell during the event
+
+The demand for sold out items needs to be estimated as we do not wish for items to be sold out before the event is over. If the item is sold out while the event is ongoing, this leads to lost sales and therefore lost revenue.
+
+If we are able to accurately predict the demand, then the inventory of the item will last throughout the event leading to zero shortages and maximisation of revenue from a particular style.
+
+### 2. Using Percentage of Sales
+
+In the context of the case and while using clustering algorithms to group products, it is important to use percentages or relative sales rather than absolute values. Clustering algorithms often rely on relative differences between variables to identify patterns and groups. By using relative values, it is ensured that the algorithm is identifying patterns in demand relative to overall sales, rather than just absolute demand.
+
+In the context of the clustering algorithm used, it is important to understand that clustering was based on grouping data based on the pattern of sales in each hour. Therefore if a product sold 500 items in hour 1 (which was 10% of its overall sales) while another product sold 5 items in hour 1 (which was also 10% of its overall sales), they should be clustered together. Using absolute values would not account that they have sold relatively the same compared to their overall sales.
+
+\newpage
+
+## Clustering
+
+### 1. K-means
+
+Steps conducted:\
+1. Randomly select 1000 values from the data set\
+2. Filter out sold out and non-sold out items and store them in separate dataframes\
+3. Perform k-means clustering for only the unsold. This allows us to map the sold items later to the unsold clusters in order to predict their demand.\
+4. Repeat clustering for k = 2,3,4,5 using a for loop
+
+Sample centroid values for k = 2 and k = 5 can be seen below for reference:
+
+```{r}
+sample <- df %>%
+  sample_n(1000)
+
+unsold <- sample %>%
+  filter(sold_out == "No")
+
+sold <- sample %>%
+  filter(sold_out == "Yes")
+```
+
+```{r}
+centroid_list <- list()
+
+for (k in 2:5) {
+  # Run k-means algorithm for each k value
+  kmeans_result <- kmeans(unsold[,3:26], centers = k)
+  # Extract centroids
+  centroids <- kmeans_result$centers
+  # Store centroids in a data frame and add to the centroid_list
+  centroid_df <- as.data.frame(centroids)
+  centroid_list[[k-1]] <- centroid_df
+}
+names(centroid_list) <- paste0("c_", 2:5)
+c_2 <- centroid_list$c_2
+c_3 <- centroid_list$c_3
+c_4 <- centroid_list$c_4
+c_5 <- centroid_list$c_5
+
+c_2_label <- tibble(cluster = c(1, 2))
+c_5_label <- tibble(cluster = c(1, 2, 3, 4, 5))
+
+c_2_new <- bind_cols(c_2_label, c_2)
+c_5_new <- bind_cols(c_5_label, c_5)
+
+kable(head(c_2_new[,1:6]), digits = 3, caption = "Centroid values for k = 2")
+kable(head(c_5_new[,1:6]), digits = 3, caption = "Centroid values for k = 5")
+
+```
+
+```{r}
+# Loop through each k value and assign clusters to the unsold data frame
+for (k in 2:5) {
+  # Get the centroids for the current k value
+  centroid_df_name <- paste0("c_", k)
+  centroids <- centroid_list[[centroid_df_name]]
+  
+  # Assign clusters to the unsold data frame using k-means centroids
+  col_name <- paste0("cluster_k", k)
+  sold[, col_name] <- apply(sold[,3:26], 1, function(x) {
+    # Calculate distances to centroids for the current k value
+    distances <- apply(centroids, 1, function(y) sqrt(sum((x - y)^2)))
+    # Assign to the closest cluster
+    which(distances == min(distances))
+  })
+}
+```
+
+```{r}
+
+# Iterate through each centroid data frame in the centroid_list
+sum_list <- vector(mode = "numeric", length = nrow(sold))
+colnames_list <- list()
+for (i in 1:length(centroid_list)) {
+  # Get the i-th centroid data frame
+  c_i <- centroid_list[[i]]
+  colname <- numeric(nrow(sold))
+  for (j in 1:nrow(sold)){
+    #
+    k <- as.integer(sold[j,i+29])
+    sold_time <- sold$sold_out_time[j]
+    
+    colname[j] <- sum(c_i[k, sold_time:24])
+  }
+  colnames_list[[i]] <- colname
+}
+names(colnames_list) <- paste0("lostsales_", 2:5)
+col_df <- data.frame(colnames_list)
+
+lost_sales <- cbind(sold, col_df)
+
+pred_dem <- lost_sales %>%
+  mutate(pred_demand2 = total_sales/(1- as.double(lostsales_2)), 
+         pred_demand3 = total_sales /(1 - as.double(lostsales_3)),
+         pred_demand4 = total_sales /(1 - as.double(lostsales_2)), 
+         pred_demand5 = total_sales /(1 - as.double(lostsales_2))) %>%
+  arrange(item_number)
+
+```
+
+```{r}
+write_csv(pred_dem, "pred_dem.csv")
+```
+
+\newpage
+
+### 2. Sum of Squares & Average Distance of Points
+
+Using commands from the `factoextra` library, we were able to plot the sum of squares and average distance of points for different clusters.
+
+```{r, fig.cap="Sum of Squares in Different Clusters"}
+fviz_nbclust(unsold[,3:26], FUNcluster = kmeans , method = "wss")
+```
+
+```{r, fig.cap="Average Difference of Points in Different Clusters"}
+fviz_nbclust(unsold[,3:26], FUNcluster = kmeans , method = "silhouette")
+```
+
+\newpage
+
+### 3. Estimating Demand
+
+Steps conducted:
+
+1.  Assign clusters to each item that was sold out:
+    -   Calculate the distance between each hour of the centroids to each hour of the sold out values
+    -   The minimum of the summation of those distances would be the assigned cluster
+2.  Calculate lost sales for each sold out item:
+    -   Check assigned cluster and sold out hour of each sold out item
+    -   Use those values to sum the rows for the assigned cluster value up until the sold out hour
+3.  Calculate predicted demand for each item:
+    -   Predicted demand = (total sales)/(1 - lost sales)
+4.  Repeat for each k = 2, 3, 4 and 5
+
+A snapshot of the results can be seen below:
+
+```{r}
+kable(head(pred_dem)[, c(1, 30:31, 34:35, 38:39)], digits = c(0, 0, 3, 3, 3, 0, 0), 
+      format.args = list(big.mark = ","), 
+      caption = "Assigned Clusters for Sold Out Items for k = 2 and k = 3")
+```
+
+To examine the behavior simply between different k values, we visualize the average sales of the predicted demand vs the average sales for the unsold items:
+
+```{r, fig.cap= "Average Predicted Demand for each Cluster"}
+avg_pred <- pred_dem %>%
+  summarize(avg_k2 = mean(pred_demand2), avg_k3 = mean(pred_demand3),
+            avg_k4 = mean(pred_demand4), avg_k5 = mean(pred_demand5))
+
+avg_sales <- unsold %>%
+  summarize(avg_sales_unsold = mean(total_sales)) 
+
+avg_df <- cbind(avg_sales, avg_pred)
+
+# Convert data from wide to long format
+avg_df_long <- avg_df %>% 
+  pivot_longer(everything(), names_to = "variable", values_to = "value")
+
+# Create bar chart with specified properties
+ggplot(avg_df_long, aes(x = ifelse(variable == "avg_sales_unsold", 
+                                   "Unsold Items", paste0("k = ", str_remove(variable, "avg_k"))), 
+                        y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(width=0.6), width=0.6) +
+  scale_fill_manual(values = c("#2b8cbe", "#7bccc4", "#bae4bc", "#f0f9e8", "#fcc5c0")) +
+  labs(title = "Average Values of Each Cluster", x = NULL, y = "Sales") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        legend.position = "none",
+        panel.grid.major.x = element_blank())
+  
+```
+
+### 4. Recommendation
+
+The number of clusters recommended would be 3. This is due to the following:
+
+-   Increasing number of clusters from 2 to 3 does not significantly impact the Within Sum of Squares value
+-   The average width evens out starting k = 3
